@@ -135,10 +135,10 @@ def handle_all(message):
             return
         pending_inputs[user_id]["url"] = text
         pending_inputs[user_id]["step"] = "waiting_for_seconds"
-        bot.send_message(user_id, "⏱️ Now enter the interval in seconds between each visit (e.g., 30):")
+        bot.send_message(user_id, "⏱️ Now enter the interval in seconds between each visit:")
         return
 
-    if step == "waiting_for_seconds":
+    elif step == "waiting_for_seconds":
         try:
             seconds = int(text)
             if seconds < 5:
@@ -149,11 +149,16 @@ def handle_all(message):
             return
 
         url = pending_inputs[user_id].get("url")
-        user_links.setdefault(user_id, []).append(url)
-        active_visits[user_id]["step"] = "running"
-        pending_inputs[user_id] = {}
+        if not url:
+            bot.send_message(user_id, "❌ Something went wrong. Please try again.")
+            pending_inputs.pop(user_id, None)
+            return
 
-        bot.send_message(user_id, f"🚀 Visiting {url} every {seconds} seconds in background.")
+        user_links.setdefault(user_id, []).append(url)
+        active_visits[user_id] = {"step": "running"}
+        pending_inputs.pop(user_id, None)
+
+        bot.send_message(user_id, f"🚀 Started visiting:\n{url}\n\n🕒 Interval: {seconds} seconds.")
 
         def visit():
             while url in user_links.get(user_id, []):
