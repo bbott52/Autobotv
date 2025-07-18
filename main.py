@@ -14,6 +14,7 @@ BNB_ADDRESS = "0xa84bd2cfbBad66Ae2c5daf9aCe764dc845b94C7C"
 bot = telebot.TeleBot(BOT_TOKEN)
 active_visits = {}
 
+# ---------------------- MAIN BUTTONS ----------------------
 def show_main_buttons(user_id):
     markup = InlineKeyboardMarkup()
     markup.row(
@@ -22,10 +23,14 @@ def show_main_buttons(user_id):
     )
     markup.row(
         InlineKeyboardButton("👥 Referral", callback_data="referral"),
+        InlineKeyboardButton("🔗 Manage Links", callback_data="manage_links")
+    )
+    markup.row(
         InlineKeyboardButton("🧑‍💼 Contact Admin", url="https://wa.me/2349114301708")
     )
     bot.send_message(user_id, "👋 Welcome to Link Visitor Bot!", reply_markup=markup)
 
+# ---------------------- /START HANDLER ----------------------
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     user_id = message.from_user.id
@@ -57,6 +62,7 @@ def handle_start(message):
 
     show_main_buttons(user_id)
 
+# ---------------------- CALLBACK HANDLERS ----------------------
 @bot.callback_query_handler(func=lambda c: True)
 def callback_handler(call):
     user_id = call.from_user.id
@@ -68,9 +74,14 @@ def callback_handler(call):
         show_main_buttons(user_id)
 
     elif data == "add_link":
-        if not is_premium(user_id):
-            bot.answer_callback_query(call.id, "⛔ Trial expired. Buy premium.")
+        user_state = active_visits.get(user_id, {})
+        can_add_multiple = user_state.get("can_add_multiple", False)
+
+        if user_state.get("step") == "running" and not can_add_multiple:
+            bot.answer_callback_query(call.id)
+            bot.send_message(user_id, "❌ You already have a running link. Stop it before adding a new one.")
             return
+
         bot.send_message(user_id, "🔗 Send the URL to auto-visit:")
         active_visits[user_id] = {"step": "waiting_for_link"}
 
@@ -85,11 +96,40 @@ def callback_handler(call):
         link = f"https://t.me/linkvisitorbyurlbot?start=ref_{user_id}"
         bot.send_message(user_id, f"👥 Share your referral link:\n{link}")
 
+    elif data == "manage_links":
+        user_state = active_visits.get(user_id)
+
+        if not user_state or user_state.get("step") != "running":
+            bot.answer_callback_query(call.id)
+            bot.send_message(user_id, "😕 You have no active links.")
+            return
+
+        url = user_state.get("link")
+        interval = user_state.get("interval", "unknown")
+
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("🛑 Stop Visiting", callback_data="stop_visiting")
+        )
+        bot.answer_callback_query(call.id)
+        bot.send_message(user_id, f"🔗 Currently visiting:\n{url}\n⏱️ Interval: {interval} seconds", reply_markup=markup)
+
+    elif data == "stop_visiting":
+        if user_id in active_visits:
+            active_visits.pop(user_id)
+            bot.answer_callback_query(call.id, "🛑 Visiting stopped.")
+            bot.send_message(user_id, "✅ Your link visiting has been stopped.")
+        else:
+            bot.answer_callback_query(call.id)
+            bot.send_message(user_id, "❌ No active visiting found.")
+
+# ---------------------- MESSAGE HANDLER ----------------------
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     user_id = message.from_user.id
-    text = message.text
+    text = message.text.strip()
 
+    # OWNER: Confirm Premium
     if user_id == OWNER_ID and text.startswith("confirm "):
         parts = text.split()
         if len(parts) == 3:
@@ -100,15 +140,43 @@ def handle_all(message):
             bot.send_message(OWNER_ID, f"✅ User {target_id} upgraded for {months} month(s).")
         return
 
+    # OWNER: Allow Multiple Links
+    if user_id == OWNER_ID and text.startswith("allow_multiple "):
+        target_id = int(text.split()[1])
+        if target_id not in active_visits:
+            active_visits[target_id] = {}
+        active_visits[target_id]["can_add_multiple"] = True
+        bot.send_message(OWNER_ID, f"✅ User {target_id} can now add multiple links.")
+        return
+
+    # Handle user interaction flow
     state = active_visits.get(user_id, {})
-    if state.get("step") == "waiting_for_link":
-        url = text.strip()
+    step = state.get("step")
+
+    if step == "waiting_for_link":
+        url = text
         if not url.startswith("http"):
-            bot.send_message(user_id, "❌ Invalid URL.")
+            bot.send_message(user_id, "❌ Invalid URL. Must start with http or https.")
+            return
+        active_visits[user_id]["link"] = url
+        active_visits[user_id]["step"] = "waiting_for_interval"
+        bot.send_message(user_id, "⏱️ How often (in seconds) should we visit this link?")
+        return
+
+    elif step == "waiting_for_interval":
+        try:
+            interval = int(text)
+            if interval < 10:
+                bot.send_message(user_id, "⚠️ Interval must be at least 10 seconds.")
+                return
+        except ValueError:
+            bot.send_message(user_id, "❌ Please enter a valid number.")
             return
 
-        bot.send_message(user_id, f"🚀 Visiting {url} every 30 seconds.")
+        url = active_visits[user_id]["link"]
+        active_visits[user_id]["interval"] = interval
         active_visits[user_id]["step"] = "running"
+        bot.send_message(user_id, f"🚀 Now visiting:\n{url}\nEvery {interval} seconds.")
 
         def visit():
             while active_visits.get(user_id, {}).get("step") == "running":
@@ -116,12 +184,14 @@ def handle_all(message):
                     requests.get(url, headers=generate_headers(), timeout=5)
                     print(f"[{datetime.now()}] Visited {url}")
                 except:
-                    pass
-                time.sleep(30)
+                    print(f"[{datetime.now()}] Error visiting {url}")
+                time.sleep(interval)
 
         threading.Thread(target=visit, daemon=True).start()
+        return
 
-    else:
-        bot.send_message(user_id, "❓ Use /start or click a button.")
+    # Default fallback
+    bot.send_message(user_id, "❓ Use /start or click a menu button.")
 
+# ---------------------- START POLLING ----------------------
 bot.polling()
