@@ -1,177 +1,133 @@
+# bot.py
+
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime
-import requests
-import threading
+from datetime import datetime, timedelta
 import time
 from database import *
 from utils import *
 
-BOT_TOKEN = "7854510116:AAEpFEs3b_YVNs4jvFH6d1JOZ5Dern69_Sg"
-OWNER_ID = 6976365864
-BNB_ADDRESS = "0xa84bd2cfbBad66Ae2c5daf9aCe764dc845b94C7C"
-
+BOT_TOKEN = "7782600997:AAHkI0CBrgQqeFdykaI7qFWMEECYImmd00M"
 bot = telebot.TeleBot(BOT_TOKEN)
-active_visits = {}
-user_links = {}
-pending_inputs = {}  # To track per-user input steps
+OWNER_ID = 6940101627
 
-def show_main_buttons(user_id):
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("➕ Add Link", callback_data="add_link"),
-        InlineKeyboardButton("📄 My Links", callback_data="my_links")
-    )
-    markup.row(
-        InlineKeyboardButton("💎 Buy Premium", callback_data="buy_premium"),
-        InlineKeyboardButton("👥 Referral", callback_data="referral"),
-    )
-    markup.row(
-        InlineKeyboardButton("🧑‍💼 Contact Admin", url="https://wa.me/2349114301708")
-    )
-    bot.send_message(user_id, "👋 Welcome to Link Visitor Bot!", reply_markup=markup)
+YOUTUBE_LINK = "https://youtube.com/@bbottecbot?si=OI0u1AQFxYBpvl4f"
+TELEGRAM_CHANNEL = "@boostlinkv"
 
-@bot.message_handler(commands=['start'])
-def handle_start(message):
+@bot.message_handler(commands=["start"])
+def start_cmd(message):
     user_id = message.from_user.id
-    parts = message.text.strip().split()
-    ref_by = None
+    args = message.text.split(" ")
+    if len(args) > 1:
+        ref = args[1]
+        if ref != str(user_id):
+            add_referral(ref)
+            bot.send_message(ref, f"🎉 You referred {message.from_user.first_name} and earned 1 referral.")
 
-    if len(parts) == 2 and parts[1].startswith("ref_"):
-        ref_by = int(parts[1][4:])
-        if ref_by != user_id:
-            init_user(user_id, ref_by)
-            add_referral(ref_by)
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(InlineKeyboardButton("✅ Joined Both", callback_data="verify_join"))
+    msg = (
+        f"👋 Hello {message.from_user.first_name}!\n\n"
+        "Please join our required channels before using the bot:\n\n"
+        f"📺 YouTube: [Click here]({YOUTUBE_LINK})\n"
+        f"📢 Telegram: {TELEGRAM_CHANNEL}\n\n"
+        "Click the button below once you’ve joined both."
+    )
+    bot.send_message(user_id, msg, reply_markup=keyboard, parse_mode="Markdown")
 
-    init_user(user_id)
-
-    if not has_subscribed(user_id):
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("📢 Join Telegram", url="https://t.me/boostlinkv"),
-            InlineKeyboardButton("▶️ Subscribe YouTube", url="https://youtube.com/@bbottecbot?si=T7u0Y9s1WolxMFW8")
-        )
-        markup.row(
-            InlineKeyboardButton("✅ I Have Subscribed", callback_data="confirm_subscription")
-        )
-        bot.send_message(user_id, "🔔 Before using the bot, please:\n\n"
-                                  "1️⃣ Join our Telegram channel\n"
-                                  "2️⃣ Subscribe to our YouTube\n\n"
-                                  "Then click 'I Have Subscribed' below 👇", reply_markup=markup)
-        return
-
-    show_main_buttons(user_id)
-
-@bot.callback_query_handler(func=lambda c: True)
-def callback_handler(call):
+@bot.callback_query_handler(func=lambda c: c.data == "verify_join")
+def verify_callback(call):
     user_id = call.from_user.id
-    data = call.data
+    joined = check_telegram_channel_membership(bot, TELEGRAM_CHANNEL, user_id)
+    subscribed = check_youtube_subscription(user_id)
 
-    if data == "confirm_subscription":
-        mark_subscribed(user_id)
-        bot.answer_callback_query(call.id, "✅ Subscription confirmed!")
-        show_main_buttons(user_id)
+    if joined and subscribed:
+        set_user_joined(user_id)
+        set_user_subscribed(user_id)
+        bot.answer_callback_query(call.id, "✅ Verified!")
+        show_main_menu(user_id)
+    else:
+        bot.answer_callback_query(call.id, "❌ Please make sure you joined both Telegram and YouTube.")
 
-    elif data == "add_link":
-        if not is_premium(user_id) and len(user_links.get(user_id, [])) >= 1:
-            bot.answer_callback_query(call.id, "⛔ Trial expired or max link reached.")
-            return
-        bot.send_message(user_id, "🔗 Send the URL to auto-visit:")
-        pending_inputs[user_id] = {"step": "waiting_for_link"}
+def show_main_menu(user_id):
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("➕ Add Link", callback_data="add_link"))
+    keyboard.add(InlineKeyboardButton("🔗 View/Stop Link", callback_data="view_link"))
+    keyboard.add(InlineKeyboardButton("👥 Refer & Earn", callback_data="referral"))
+    bot.send_message(user_id, "🔘 Main Menu:", reply_markup=keyboard)
 
-    elif data == "buy_premium":
-        qr = generate_qr(BNB_ADDRESS)
-        bot.send_photo(user_id, qr, caption="💰 Pay to the BNB Address above:\n\n"
-                         "5$ = 3 months\n10$ = 9 months\n20$ = 1.5 years\n50$ = Lifetime\n\n"
-                         f"Address: `{BNB_ADDRESS}`", parse_mode="Markdown")
-        bot.send_message(user_id, "📩 After payment, send a screenshot and TXID here.")
+@bot.callback_query_handler(func=lambda c: c.data == "add_link")
+def add_link_callback(call):
+    user_id = call.from_user.id
+    if not is_user_subscribed(user_id):
+        bot.answer_callback_query(call.id, "Please join channels first.")
+        return
 
-    elif data == "referral":
-        link = f"https://t.me/linkvisitorbyurlbot?start=ref_{user_id}"
-        bot.send_message(user_id, f"👥 Share your referral link:\n{link}")
+    if not has_allowance(user_id):
+        bot.send_message(user_id, "❌ You must refer 3 users to earn 1-day posting allowance.")
+        return
 
-    elif data == "my_links":
-        links = user_links.get(user_id, [])
-        if not links:
-            bot.send_message(user_id, "📭 You haven’t added any links yet.")
-            return
-        markup = InlineKeyboardMarkup()
-        for idx, url in enumerate(links):
-            markup.row(InlineKeyboardButton(f"❌ Stop {idx+1}", callback_data=f"remove_{idx}"))
-        links_str = "\n".join([f"{i+1}. {url}" for i, url in enumerate(links)])
-        bot.send_message(user_id, f"🔗 Your Links:\n{links_str}", reply_markup=markup)
+    bot.send_message(user_id, "🔗 Send the link you want to promote:")
+    bot.register_next_step_handler(call.message, get_link_url)
 
-    elif data.startswith("remove_"):
-        index = int(data.split("_")[1])
-        links = user_links.get(user_id, [])
-        if 0 <= index < len(links):
-            removed = links.pop(index)
-            active_visits[user_id] = {"step": None}
-            bot.send_message(user_id, f"✅ Link removed: {removed}")
-        else:
-            bot.send_message(user_id, "❌ Invalid link number.")
-
-@bot.message_handler(func=lambda m: True)
-def handle_all(message):
+def get_link_url(message):
     user_id = message.from_user.id
-    text = message.text.strip()
+    url = message.text.strip()
+    bot.send_message(user_id, "⏱ How many seconds should users stay on this link? (Example: 30)")
+    bot.register_next_step_handler(message, lambda msg: set_link_duration(msg, url))
 
-    if user_id == OWNER_ID and text.startswith("confirm "):
-        parts = text.split()
-        if len(parts) == 3:
-            target_id = int(parts[1])
-            months = int(parts[2])
-            set_premium(target_id, months * 30)
-            bot.send_message(target_id, "✅ Premium activated.")
-            bot.send_message(OWNER_ID, f"✅ User {target_id} upgraded for {months} month(s).")
+def set_link_duration(message, url):
+    user_id = message.from_user.id
+    try:
+        duration = int(message.text.strip())
+        if duration <= 0 or duration > 300:
+            raise ValueError()
+    except ValueError:
+        bot.send_message(user_id, "⚠️ Please enter a valid number of seconds (1-300).")
         return
 
-    state = pending_inputs.get(user_id, {})
-    step = state.get("step")
+    add_link(user_id, url, duration)
+    grant_allowance(user_id)
+    bot.send_message(user_id, f"✅ Your link has been added for {duration} seconds.")
+    show_main_menu(user_id)
 
-    if step == "waiting_for_link":
-        if not text.startswith("http"):
-            bot.send_message(user_id, "❌ Invalid URL. Make sure it starts with http or https.")
-            return
-        pending_inputs[user_id]["url"] = text
-        pending_inputs[user_id]["step"] = "waiting_for_seconds"
-        bot.send_message(user_id, "⏱️ Now enter the interval in seconds between each visit:")
+@bot.callback_query_handler(func=lambda c: c.data == "view_link")
+def view_user_link(call):
+    user_id = call.from_user.id
+    link_data = get_user_link(user_id)
+    if not link_data:
+        bot.send_message(user_id, "❌ You have not added any link yet.")
         return
 
-    elif step == "waiting_for_seconds":
-        try:
-            seconds = int(text)
-            if seconds < 5:
-                bot.send_message(user_id, "⚠️ Minimum allowed interval is 5 seconds.")
-                return
-        except ValueError:
-            bot.send_message(user_id, "❌ Please enter a valid number.")
-            return
+    status = "🟢 Active" if link_data["active"] else "🔴 Stopped"
+    msg = (
+        f"🔗 Your Link: {link_data['url']}\n"
+        f"⏱ Duration: {link_data['duration']} sec\n"
+        f"📅 Posted: {link_data['start_time'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"⚙️ Status: {status}"
+    )
+    keyboard = InlineKeyboardMarkup()
+    if link_data["active"]:
+        keyboard.add(InlineKeyboardButton("⛔ Stop Link", callback_data="stop_link"))
+    bot.send_message(user_id, msg, reply_markup=keyboard)
 
-        url = pending_inputs[user_id].get("url")
-        if not url:
-            bot.send_message(user_id, "❌ Something went wrong. Please try again.")
-            pending_inputs.pop(user_id, None)
-            return
+@bot.callback_query_handler(func=lambda c: c.data == "stop_link")
+def stop_link_now(call):
+    user_id = call.from_user.id
+    stop_user_link(user_id)
+    bot.send_message(user_id, "✅ Your link has been stopped.")
+    show_main_menu(user_id)
 
-        user_links.setdefault(user_id, []).append(url)
-        active_visits[user_id] = {"step": "running"}
-        pending_inputs.pop(user_id, None)
+@bot.callback_query_handler(func=lambda c: c.data == "referral")
+def referral_menu(call):
+    user_id = call.from_user.id
+    ref_link = f"https://t.me/boostlinkv?start={user_id}"
+    referrals = users.get(user_id, {}).get("referrals", 0)
+    msg = (
+        f"👥 Your Referral Link:\n`{ref_link}`\n\n"
+        f"🎯 Referrals: {referrals}\n\n"
+        "📌 Refer 3 users to get 1 day allowance to post your link."
+    )
+    bot.send_message(user_id, msg, parse_mode="Markdown")
 
-        bot.send_message(user_id, f"🚀 Started visiting:\n{url}\n\n🕒 Interval: {seconds} seconds.")
-
-        def visit():
-            while url in user_links.get(user_id, []):
-                try:
-                    requests.get(url, headers=generate_headers(), timeout=5)
-                    print(f"[{datetime.now()}] Visited {url}")
-                except:
-                    pass
-                time.sleep(seconds)
-
-        threading.Thread(target=visit, daemon=True).start()
-        return
-
-    bot.send_message(user_id, "❓ Use /start or click a button.")
-
-bot.polling()
+bot.infinity_polling()
