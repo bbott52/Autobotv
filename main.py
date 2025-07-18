@@ -14,6 +14,7 @@ BNB_ADDRESS = "0xa84bd2cfbBad66Ae2c5daf9aCe764dc845b94C7C"
 bot = telebot.TeleBot(BOT_TOKEN)
 active_visits = {}
 user_links = {}
+pending_inputs = {}  # To track per-user input steps
 
 def show_main_buttons(user_id):
     markup = InlineKeyboardMarkup()
@@ -76,7 +77,7 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "⛔ Trial expired or max link reached.")
             return
         bot.send_message(user_id, "🔗 Send the URL to auto-visit:")
-        active_visits[user_id] = {"step": "waiting_for_link"}
+        pending_inputs[user_id] = {"step": "waiting_for_link"}
 
     elif data == "buy_premium":
         qr = generate_qr(BNB_ADDRESS)
@@ -113,7 +114,7 @@ def callback_handler(call):
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     user_id = message.from_user.id
-    text = message.text
+    text = message.text.strip()
 
     if user_id == OWNER_ID and text.startswith("confirm "):
         parts = text.split()
@@ -125,17 +126,34 @@ def handle_all(message):
             bot.send_message(OWNER_ID, f"✅ User {target_id} upgraded for {months} month(s).")
         return
 
-    state = active_visits.get(user_id, {})
-    if state.get("step") == "waiting_for_link":
-        url = text.strip()
-        if not url.startswith("http"):
-            bot.send_message(user_id, "❌ Invalid URL.")
+    state = pending_inputs.get(user_id, {})
+    step = state.get("step")
+
+    if step == "waiting_for_link":
+        if not text.startswith("http"):
+            bot.send_message(user_id, "❌ Invalid URL. Make sure it starts with http or https.")
+            return
+        pending_inputs[user_id]["url"] = text
+        pending_inputs[user_id]["step"] = "waiting_for_seconds"
+        bot.send_message(user_id, "⏱️ Now enter the interval in seconds between each visit (e.g., 30):")
+        return
+
+    if step == "waiting_for_seconds":
+        try:
+            seconds = int(text)
+            if seconds < 5:
+                bot.send_message(user_id, "⚠️ Minimum allowed interval is 5 seconds.")
+                return
+        except ValueError:
+            bot.send_message(user_id, "❌ Please enter a valid number.")
             return
 
+        url = pending_inputs[user_id].get("url")
         user_links.setdefault(user_id, []).append(url)
         active_visits[user_id]["step"] = "running"
+        pending_inputs[user_id] = {}
 
-        bot.send_message(user_id, f"🚀 Visiting {url} every 30 seconds in background.")
+        bot.send_message(user_id, f"🚀 Visiting {url} every {seconds} seconds in background.")
 
         def visit():
             while url in user_links.get(user_id, []):
@@ -144,11 +162,11 @@ def handle_all(message):
                     print(f"[{datetime.now()}] Visited {url}")
                 except:
                     pass
-                time.sleep(30)
+                time.sleep(seconds)
 
         threading.Thread(target=visit, daemon=True).start()
+        return
 
-    else:
-        bot.send_message(user_id, "❓ Use /start or click a button.")
+    bot.send_message(user_id, "❓ Use /start or click a button.")
 
 bot.polling()
