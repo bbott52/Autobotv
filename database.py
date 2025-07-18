@@ -1,45 +1,38 @@
-from tinydb import TinyDB, Query
+# database.py
+
 from datetime import datetime, timedelta
 
-db = TinyDB("users.json")
-User = Query()
+users = {}
+links = {}
 
-def init_user(user_id, ref_by=None):
-    if not db.contains(User.id == user_id):
-        db.insert({
-            'id': user_id,
-            'is_admin': user_id == 6976365864,
-            'premium_until': str(datetime.utcnow() + timedelta(days=3)),
-            'ref_by': ref_by,
-            'ref_count': 0,
-            'subscribed': False
-        })
+def is_user_subscribed(user_id):
+    user = users.get(user_id, {})
+    return user.get("joined", False) and user.get("subscribed", False)
 
-def get_user(user_id):
-    return db.get(User.id == user_id)
+def set_user_joined(user_id):
+    users.setdefault(user_id, {})["joined"] = True
 
-def set_premium(user_id, days):
-    premium_until = datetime.utcnow() + timedelta(days=days)
-    db.update({'premium_until': str(premium_until)}, User.id == user_id)
+def set_user_subscribed(user_id):
+    users.setdefault(user_id, {})["subscribed"] = True
 
-def is_premium(user_id):
-    user = get_user(user_id)
-    if not user:
-        return False
-    expiry = datetime.fromisoformat(user['premium_until'])
-    return datetime.utcnow() < expiry
+def add_referral(referrer_id):
+    user = users.setdefault(referrer_id, {})
+    user["referrals"] = user.get("referrals", 0) + 1
 
-def add_referral(ref_id):
-    user = get_user(ref_id)
-    if user:
-        count = user.get('ref_count', 0) + 1
-        db.update({'ref_count': count}, User.id == ref_id)
-        if count % 3 == 0:
-            set_premium(ref_id, 1)
+def has_allowance(user_id):
+    user = users.get(user_id, {})
+    return user.get("referrals", 0) >= 3 or user.get("allowance_expiry", datetime.min) > datetime.utcnow()
 
-def has_subscribed(user_id):
-    user = get_user(user_id)
-    return user and user.get("subscribed", False)
+def grant_allowance(user_id):
+    users.setdefault(user_id, {})["allowance_expiry"] = datetime.utcnow() + timedelta(days=1)
+    users[user_id]["referrals"] = 0
 
-def mark_subscribed(user_id):
-    db.update({'subscribed': True}, User.id == user_id)
+def add_link(user_id, url, duration):
+    links[user_id] = {"url": url, "duration": duration, "active": True, "start_time": datetime.utcnow()}
+
+def get_user_link(user_id):
+    return links.get(user_id)
+
+def stop_user_link(user_id):
+    if user_id in links:
+        links[user_id]["active"] = False
