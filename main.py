@@ -1,84 +1,127 @@
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime
 import requests
+import threading
 import time
+from database import *
+from utils import *
 
-# === CONFIGURATION ===
 BOT_TOKEN = "7854510116:AAEpFEs3b_YVNs4jvFH6d1JOZ5Dern69_Sg"
-OWNER_ID = 6976365864  # Replace with your Telegram ID
+OWNER_ID = 6976365864
+BNB_ADDRESS = "0xa84bd2cfbBad66Ae2c5daf9aCe764dc845b94C7C"
 
 bot = telebot.TeleBot(BOT_TOKEN)
+active_visits = {}
 
-# === BOT STATE ===
-user_settings = {}
+def show_main_buttons(user_id):
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("➕ Add Link", callback_data="add_link"),
+        InlineKeyboardButton("💎 Buy Premium", callback_data="buy_premium")
+    )
+    markup.row(
+        InlineKeyboardButton("👥 Referral", callback_data="referral"),
+        InlineKeyboardButton("🧑‍💼 Contact Admin", url="https://wa.me/2349114301708")
+    )
+    bot.send_message(user_id, "👋 Welcome to Link Visitor Bot!", reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "⛔ Access denied. Only the bot owner can use this.")
+    user_id = message.from_user.id
+    parts = message.text.strip().split()
+    ref_by = None
+
+    if len(parts) == 2 and parts[1].startswith("ref_"):
+        ref_by = int(parts[1][4:])
+        if ref_by != user_id:
+            init_user(user_id, ref_by)
+            add_referral(ref_by)
+
+    init_user(user_id)
+
+    if not has_subscribed(user_id):
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("📢 Join Telegram", url="https://t.me/boostlinkv"),
+            InlineKeyboardButton("▶️ Subscribe YouTube", url="https://youtube.com/@bbottecbot?si=T7u0Y9s1WolxMFW8")
+        )
+        markup.row(
+            InlineKeyboardButton("✅ I Have Subscribed", callback_data="confirm_subscription")
+        )
+        bot.send_message(user_id, "🔔 Before using the bot, please:\n\n"
+                                  "1️⃣ Join our Telegram channel\n"
+                                  "2️⃣ Subscribe to our YouTube\n\n"
+                                  "Then click 'I Have Subscribed' below 👇", reply_markup=markup)
         return
 
-    bot.reply_to(message, "👋 Welcome to Auto Visitor Bot!\n\n"
-                          "Please send the link you want to auto-visit.")
+    show_main_buttons(user_id)
 
-    user_settings[message.chat.id] = {
-        'step': 'waiting_for_link'
-    }
+@bot.callback_query_handler(func=lambda c: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+    data = call.data
+
+    if data == "confirm_subscription":
+        mark_subscribed(user_id)
+        bot.answer_callback_query(call.id, "✅ Subscription confirmed!")
+        show_main_buttons(user_id)
+
+    elif data == "add_link":
+        if not is_premium(user_id):
+            bot.answer_callback_query(call.id, "⛔ Trial expired. Buy premium.")
+            return
+        bot.send_message(user_id, "🔗 Send the URL to auto-visit:")
+        active_visits[user_id] = {"step": "waiting_for_link"}
+
+    elif data == "buy_premium":
+        qr = generate_qr(BNB_ADDRESS)
+        bot.send_photo(user_id, qr, caption="💰 Pay to the BNB Address above:\n\n"
+                         "5$ = 3 months\n10$ = 9 months\n20$ = 1.5 years\n50$ = Lifetime\n\n"
+                         f"Address: `{BNB_ADDRESS}`", parse_mode="Markdown")
+        bot.send_message(user_id, "📩 After payment, send a screenshot and TXID here.")
+
+    elif data == "referral":
+        link = f"https://t.me/linkvisitorbyurlbot?start=ref_{user_id}"
+        bot.send_message(user_id, f"👥 Share your referral link:\n{link}")
 
 @bot.message_handler(func=lambda m: True)
-def handle_all_messages(message):
-    if message.from_user.id != OWNER_ID:
+def handle_all(message):
+    user_id = message.from_user.id
+    text = message.text
+
+    if user_id == OWNER_ID and text.startswith("confirm "):
+        parts = text.split()
+        if len(parts) == 3:
+            target_id = int(parts[1])
+            months = int(parts[2])
+            set_premium(target_id, months * 30)
+            bot.send_message(target_id, "✅ Premium activated.")
+            bot.send_message(OWNER_ID, f"✅ User {target_id} upgraded for {months} month(s).")
         return
 
-    user_id = message.chat.id
-    state = user_settings.get(user_id, {})
-
-    if state.get('step') == 'waiting_for_link':
-        url = message.text.strip()
+    state = active_visits.get(user_id, {})
+    if state.get("step") == "waiting_for_link":
+        url = text.strip()
         if not url.startswith("http"):
-            bot.reply_to(message, "❌ Invalid URL. Please enter a valid link starting with http or https.")
+            bot.send_message(user_id, "❌ Invalid URL.")
             return
 
-        state['url'] = url
-        state['step'] = 'waiting_for_interval'
-        bot.reply_to(message, "✅ Link saved.\n\nNow enter visit interval in seconds (e.g., 10):")
-        return
+        bot.send_message(user_id, f"🚀 Visiting {url} every 30 seconds.")
+        active_visits[user_id]["step"] = "running"
 
-    elif state.get('step') == 'waiting_for_interval':
-        try:
-            interval = int(message.text.strip())
-            if interval <= 0:
-                raise ValueError()
-        except ValueError:
-            bot.reply_to(message, "❌ Please enter a valid number of seconds.")
-            return
+        def visit():
+            while active_visits.get(user_id, {}).get("step") == "running":
+                try:
+                    requests.get(url, headers=generate_headers(), timeout=5)
+                    print(f"[{datetime.now()}] Visited {url}")
+                except:
+                    pass
+                time.sleep(30)
 
-        state['interval'] = interval
-        state['step'] = 'running'
-        bot.reply_to(message, f"🚀 Started visiting {state['url']} every {interval} seconds.\n\n"
-                              f"Send /stop to end the visit loop.")
-
-        # Start loop in background
-        bot.send_message(user_id, "👀 Visiting...")
-        start_visiting(user_id, state['url'], interval)
-
-    elif message.text == "/stop":
-        state['step'] = 'stopped'
-        bot.reply_to(message, "🛑 Visiting stopped.")
-        return
+        threading.Thread(target=visit, daemon=True).start()
 
     else:
-        bot.reply_to(message, "❓ Send /start to begin.")
-
-def start_visiting(user_id, url, interval):
-    def visit_loop():
-        while user_settings.get(user_id, {}).get('step') == 'running':
-            try:
-                response = requests.get(url)
-                print(f"Visited {url} - Status: {response.status_code}")
-            except Exception as e:
-                print(f"Error visiting {url}: {e}")
-            time.sleep(interval)
-    import threading
-    threading.Thread(target=visit_loop, daemon=True).start()
+        bot.send_message(user_id, "❓ Use /start or click a button.")
 
 bot.polling()
